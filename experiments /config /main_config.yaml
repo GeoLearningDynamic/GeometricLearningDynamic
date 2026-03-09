@@ -1,0 +1,12 @@
+# Main experiment configuration
+seeds: 5
+M: 100
+dim: 30
+N: 1000
+steps: 3000
+lr: 0.1
+alpha: 0.5
+lam: 5.0
+noise: 3.0
+manifold: sphere
+out_dir: results/main_experiment
