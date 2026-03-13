@@ -20,7 +20,7 @@ This repository implements the complete mathematical framework proving four fund
 ### Installation
 
 ```python
-git clone https://github.com/[your-username]/geometric-learning-dynamics.git
+git clone https://github.com/GeoLearningDynamic/GeometricLearningDynamic.git
 cd geometric-learning-dynamics
 pip install -r requirements.txt# GeometricLearningDynamic
 ```
