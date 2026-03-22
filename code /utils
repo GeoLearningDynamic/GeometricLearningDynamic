@@ -1,0 +1,257 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# ----------------------------------------------------------------------
+# Synthetic datasets
+# ----------------------------------------------------------------------
+class SphereDataset:
+    def __init__(self, n_samples, dim, rotation_invariant=False, seed=42):
+        self.n_samples = n_samples
+        self.dim = dim
+        self.rotation_invariant = rotation_invariant
+        self.seed = seed
+        self.generate()
+
+    def generate(self):
+        torch.manual_seed(self.seed)
+        z = torch.randn(self.n_samples, self.dim, device=device)
+        self.X = z / torch.norm(z, dim=1, keepdim=True)
+        if self.rotation_invariant:
+            self.y = torch.zeros(self.n_samples, dtype=torch.long, device=device)
+        else:
+            self.y = (self.X[:, 0] > 0).long()
+        self.y_onehot = F.one_hot(self.y, num_classes=2).float()
+
+    def tangent_project(self, x_center, v):
+        return v - (v @ x_center) * x_center
+
+class SwissRollDataset:
+    def __init__(self, n_samples, noise=0.0, seed=42):
+        self.n_samples = n_samples
+        self.noise = noise
+        self.seed = seed
+        self.generate()
+
+    def generate(self):
+        np.random.seed(self.seed)
+        t = 1.5 * np.pi * (1 + 2 * np.random.rand(self.n_samples))
+        x = t * np.cos(t)
+        y = self.noise * np.random.randn(self.n_samples)
+        z = t * np.sin(t)
+        X_np = np.stack([x, y, z], axis=1)
+        self.y = torch.tensor((t > np.median(t)).astype(int), dtype=torch.long, device=device)
+        self.X = torch.tensor(X_np, dtype=torch.float32, device=device)
+        self.y_onehot = F.one_hot(self.y, num_classes=2).float()
+        X_cpu = self.X.cpu().numpy()
+        pca = PCA(n_components=2)
+        pca.fit(X_cpu)
+        self.tangent_basis = torch.tensor(pca.components_, dtype=torch.float32, device=device)
+
+    def tangent_project(self, x_center, v):
+        coeffs = v @ self.tangent_basis.T
+        v_parallel = coeffs @ self.tangent_basis
+        return v - v_parallel
+
+# ----------------------------------------------------------------------
+# Real dataset (MNIST / Fashion-MNIST)
+# ----------------------------------------------------------------------
+class RealDataset:
+    def __init__(self, name='mnist', n_components=50, seed=42, train=True):
+        self.name = name
+        self.n_components = n_components
+        self.seed = seed
+        self.train = train
+        self.load_data()
+        self.compute_pca()
+
+    def load_data(self):
+        import torchvision.transforms as transforms
+        import torchvision
+        transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+        if self.name == 'mnist':
+            dataset = torchvision.datasets.MNIST(root='./data', train=self.train, download=True, transform=transform)
+        else:
+            dataset = torchvision.datasets.FashionMNIST(root='./data', train=self.train, download=True, transform=transform)
+        self.X = dataset.data.float().view(-1, 784) / 255.0
+        self.y = dataset.targets
+        self.y_bin = (self.y >= 5).long()
+        self.y_onehot = F.one_hot(self.y_bin, num_classes=2).float()
+
+    def compute_pca(self):
+        X_np = self.X.numpy()
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X_np)
+        pca = PCA(n_components=self.n_components)
+        pca.fit(X_scaled)
+        self.pca_components = torch.tensor(pca.components_, dtype=torch.float32, device=device)
+        self.pca_mean = torch.tensor(scaler.mean_, dtype=torch.float32, device=device)
+
+    def tangent_normal(self, w):
+        coeffs = w @ self.pca_components.T
+        w_parallel = coeffs @ self.pca_components
+        return w - w_parallel
+
+# ----------------------------------------------------------------------
+# Gated network (synthetic)
+# ----------------------------------------------------------------------
+def psi(t):
+    return torch.log1p(t) - t / (1 + t)
+
+class BayesianRLayerNorm(nn.Module):
+    def __init__(self, dim, alpha=0.1, lam=1.0, momentum=0.9):
+        super().__init__()
+        self.alpha = alpha
+        self.lam = lam
+        self.momentum = momentum
+        self.register_buffer('running_E', torch.zeros(1))
+        self.gamma = nn.Parameter(torch.ones(dim))
+        self.beta = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x):
+        mu = x.mean(dim=0, keepdim=True)
+        sigma = x.std(dim=0, unbiased=False, keepdim=True) + 1e-5
+        E = x.var(dim=0, unbiased=False, keepdim=True).mean()
+        with torch.no_grad():
+            self.running_E = self.momentum * self.running_E + (1 - self.momentum) * E
+        E_used = self.running_E if not self.training else E
+        sigma_eff = sigma * torch.exp(self.alpha * psi(self.lam * E_used))
+        x_norm = (x - mu) / sigma_eff
+        return self.gamma * x_norm + self.beta
+
+class GatedNetwork(nn.Module):
+    def __init__(self, M, dim, use_bayesian=False, alpha=0.1, lam=1.0,
+                 constant_gate=False, seed=42):
+        super().__init__()
+        torch.manual_seed(seed)
+        self.M = M
+        self.dim = dim
+        self.constant_gate = constant_gate
+        self.w1 = nn.Parameter(torch.randn(M, dim))
+        self.w2 = nn.Parameter(torch.randn(2, M) * 0.1)
+        with torch.no_grad():
+            self.w1.data /= torch.norm(self.w1.data, dim=1, keepdim=True)
+        if use_bayesian:
+            self.bn = BayesianRLayerNorm(M, alpha, lam)
+        else:
+            self.bn = None
+
+    def gating(self, x):
+        if self.constant_gate:
+            return torch.ones(x.size(0), self.M, device=x.device)
+        act = x @ self.w1.T
+        return torch.sigmoid(10 * act)
+
+    def forward(self, x):
+        act = x @ self.w1.T
+        g = self.gating(x)
+        h = g * act
+        if self.bn is not None:
+            h = self.bn(h)
+        return h, g
+
+# ----------------------------------------------------------------------
+# MLP for real data
+# ----------------------------------------------------------------------
+class MLP(nn.Module):
+    def __init__(self, input_dim=784, hidden_dims=[256,128], output_dim=2,
+                 use_bayesian=False, alpha=0.1, lam=1.0, seed=42):
+        super().__init__()
+        torch.manual_seed(seed)
+        layers = []
+        prev_dim = input_dim
+        for hdim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hdim))
+            if use_bayesian:
+                layers.append(BayesianRLayerNorm(hdim, alpha, lam))
+            else:
+                layers.append(nn.LayerNorm(hdim))
+            layers.append(nn.ReLU())
+            prev_dim = hdim
+        layers.append(nn.Linear(prev_dim, output_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+# ----------------------------------------------------------------------
+# Gradient flow simulator (vectorized)
+# ----------------------------------------------------------------------
+class GradientFlowSimulator:
+    def __init__(self, dataset, network, lr=0.1):
+        self.dataset = dataset
+        self.net = network
+        self.lr = lr
+        self.history = {
+            'step': [],
+            'norm_perp': [],
+            'cos_align': [],
+            'a_alpha': [],
+            'L12': [],
+        }
+
+    def compute_gradient(self, X, y_onehot):
+        N = X.size(0)
+        h, g = self.net.forward(X)
+        logits = h @ self.net.w2.T
+        probs = F.softmax(logits, dim=1)
+        delta = probs - y_onehot
+        dot = delta @ self.net.w2
+        gamma_sum = (g.unsqueeze(2) * dot.unsqueeze(2) * X.unsqueeze(1)).sum(dim=0)
+        gamma_avg = gamma_sum / N
+        grad_w2_sum = (delta.unsqueeze(2) * h.unsqueeze(1)).sum(dim=0)
+        grad_w2_avg = grad_w2_sum / N
+        return gamma_avg, grad_w2_avg
+
+    def step(self, X, y_onehot):
+        gamma_avg, grad_w2_avg = self.compute_gradient(X, y_onehot)
+        w2_norms = torch.norm(self.net.w2, dim=0)
+        self.net.w1.data += self.lr * w2_norms.unsqueeze(1) * gamma_avg
+        self.net.w2.data -= self.lr * grad_w2_avg
+
+        with torch.no_grad():
+            w1 = self.net.w1
+            w2 = self.net.w2
+            M = self.net.M
+            x_center = X.mean(dim=0)
+            if isinstance(self.dataset, SphereDataset):
+                x_center = x_center / torch.norm(x_center)
+            w_perp = torch.stack([self.dataset.tangent_project(x_center, w) for w in w1])
+            norm_perp = torch.norm(w_perp, dim=1).mean().item()
+            mean_input = X.mean(dim=0)
+            mean_input = mean_input / torch.norm(mean_input)
+            cos_align = (w1 @ mean_input).abs().mean().item()
+            w1_norm = torch.norm(w1, dim=1)
+            w2_norm = torch.norm(w2, dim=0)
+            a_alpha = (w1_norm * w2_norm).mean().item()
+            if M >= 2:
+                L12 = (w1[0,0]*w1[1,1] - w1[0,1]*w1[1,0]).item()
+            else:
+                L12 = 0.0
+
+        return {'norm_perp': norm_perp, 'cos_align': cos_align,
+                'a_alpha': a_alpha, 'L12': L12}
+
+    def run(self, steps, record_every=200, name=""):
+        X = self.dataset.X
+        y_onehot = self.dataset.y_onehot
+        print(f"  Starting {name} simulation with {steps} steps...")
+        for step in range(steps):
+            diag = self.step(X, y_onehot)
+            if step % record_every == 0:
+                self.history['step'].append(step)
+                self.history['norm_perp'].append(diag['norm_perp'])
+                self.history['cos_align'].append(diag['cos_align'])
+                self.history['a_alpha'].append(diag['a_alpha'])
+                self.history['L12'].append(diag['L12'])
+            if (step+1) % 2000 == 0:
+                print(f"    ... step {step+1}/{steps}")
+        print(f"  Finished {name} simulation.")
+        for k in self.history:
+            if k != 'step':
+                self.history[k] = np.array(self.history[k])
