@@ -1,8 +1,11 @@
-# Geometric Learning Dynamics in Neural Networks
+# Geometric Foundations of Racing Dynamics – Experimental Validation
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-1.9+-red.svg)](https://pytorch.org/)
+
+
+This repository contains the code and data for the experimental validation of the four theorems presented in the paper *Geometric Foundations of Racing Dynamics: How Gradient Descent Adapts Network Capacity on Data Manifolds with Application to Bayesian R‑LayerNorm*.
 
 Code for **"A Mathematical Framework for Geometric Learning Dynamics in Neural Networks"** (Mostafa, 2026).
 
@@ -14,6 +17,14 @@ This repository implements the complete mathematical framework proving four fund
 - **Theorem 2 (Angular Momentum Conservation):** For rotation-equivariant tasks, angular momentum tensor is conserved
 - **Theorem 3 (Winning Ticket Concentration):** High-norm neurons follow von Mises-Fisher distribution
 - **Theorem 4 (Stable Racing Dynamics):** Bayesian R‑LayerNorm provides noise-adaptive growth suppression
+
+The code implements:
+
+- Synthetic sphere dataset (exact tangent space) to test manifold alignment, angular momentum conservation, and winning ticket concentration.
+- Real‑world MNIST and Fashion‑MNIST datasets with PCA approximation to test winning ticket concentration and noise gating with Bayesian R‑LayerNorm.
+- Full‑batch gradient flow for synthetic experiments and SGD with momentum for real data.
+
+All experiments were run under severe computational constraints (free Kaggle P100 GPU, 16 GB VRAM). The results are proof‑of‑concept and support the theoretical claims.
 
 ## 🚀 Quick Start
 
@@ -42,12 +53,16 @@ T4	Noise gating effect	theorem4_noise_gating.png
 
 📝 Citation
 ```python
-@article{mostafa2026geometric,
-  title={A Mathematical Framework for Geometric Learning Dynamics in Neural Networks},
-  author={Mostafa, Mohsen},
-  year={2026}
+@article{Mostafa2026Geometric,
+  author  = {Mohsen Mostafa},
+  title   = {Geometric Foundations of Racing Dynamics: How Gradient Descent Adapts Network Capacity on Data Manifolds with Application to Bayesian R‑LayerNorm},
+  journal = {Under Review},
+  year    = {2026}
 }
 ```
-📄 License
-MIT
+
+Contact
+
+For questions or issues, please open an issue on GitHub or contact mohsen.mostafa.ai@outlook.com.
+
 
